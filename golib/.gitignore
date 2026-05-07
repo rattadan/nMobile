@@ -1,0 +1,11 @@
+.idea
+vendor
+*~
+.DS_Store
+
+/build
+*.framework
+*.aar
+*.jar
+
+gomobile

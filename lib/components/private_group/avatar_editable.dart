@@ -1,0 +1,99 @@
+import 'dart:io';
+
+import 'package:flutter/widgets.dart';
+import 'package:nchat_mobile/common/locator.dart';
+import 'package:nchat_mobile/components/base/stateful.dart';
+import 'package:nchat_mobile/components/button/button.dart';
+import 'package:nchat_mobile/components/private_group/avatar.dart';
+import 'package:nchat_mobile/schema/private_group.dart';
+import 'package:nchat_mobile/screens/common/media.dart';
+import 'package:nchat_mobile/utils/asset.dart';
+
+class PrivateGroupSchemaEditable extends BaseStateFulWidget {
+  final PrivateGroupSchema privateGroup;
+  final double? radius;
+  final bool? placeHolder;
+  final Function? onSelect;
+
+  PrivateGroupSchemaEditable({
+    required this.privateGroup,
+    this.radius,
+    this.placeHolder = false,
+    this.onSelect,
+  });
+
+  @override
+  _PrivateGroupSchemaEditableState createState() => _PrivateGroupSchemaEditableState();
+}
+
+class _PrivateGroupSchemaEditableState extends BaseStateFulWidgetState<PrivateGroupSchemaEditable> {
+  File? _avatarFile;
+
+  @override
+  void onRefreshArguments() {
+    _checkAvatarFileExists();
+  }
+
+  _checkAvatarFileExists() async {
+    File? avatarFile = await widget.privateGroup.displayAvatarFile;
+    if (_avatarFile?.path != avatarFile?.path) {
+      setState(() {
+        _avatarFile = avatarFile;
+      });
+    }
+  }
+
+  _selectAvatarFile() async {
+    widget.onSelect?.call();
+  }
+
+  _photoShow(BuildContext context) {
+    Map<String, dynamic>? item = MediaScreen.createMediasItemByImagePath(null, _avatarFile?.path);
+    if (item != null) MediaScreen.go(context, [item]);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double radius = this.widget.radius ?? 24;
+
+    return SizedBox(
+      width: radius * 2,
+      height: radius * 2,
+      child: Stack(
+        children: <Widget>[
+          GestureDetector(
+            onTap: () {
+              if (this._avatarFile != null) {
+                _photoShow(context);
+              } else {
+                _selectAvatarFile();
+              }
+            },
+            child: PrivateGroupAvatar(
+              privateGroup: widget.privateGroup,
+              radius: radius,
+            ),
+          ),
+          Positioned(
+            bottom: 0,
+            right: 0,
+            child: Button(
+              padding: const EdgeInsets.all(0),
+              width: radius / 2,
+              height: radius / 2,
+              backgroundColor: application.theme.primaryColor,
+              child: Asset.iconSvg(
+                'camera',
+                color: application.theme.backgroundLightColor,
+                width: radius / 5,
+              ),
+              onPressed: () {
+                _selectAvatarFile();
+              },
+            ),
+          )
+        ],
+      ),
+    );
+  }
+}

@@ -1,0 +1,584 @@
+import 'package:nchat_mobile/common/settings.dart';
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:nchat_mobile/common/locator.dart';
+import 'package:nchat_mobile/components/base/stateful.dart';
+import 'package:nchat_mobile/components/contact/item.dart';
+import 'package:nchat_mobile/components/private_group/item.dart';
+import 'package:nchat_mobile/components/text/label.dart';
+import 'package:nchat_mobile/components/topic/item.dart';
+import 'package:nchat_mobile/schema/contact.dart';
+import 'package:nchat_mobile/schema/message.dart';
+import 'package:nchat_mobile/schema/private_group.dart';
+import 'package:nchat_mobile/schema/session.dart';
+import 'package:nchat_mobile/schema/topic.dart';
+import 'package:nchat_mobile/utils/asset.dart';
+import 'package:nchat_mobile/utils/time.dart';
+
+class ChatSessionItem extends BaseStateFulWidget {
+  final SessionSchema session;
+  final Function(dynamic)? onTap;
+  final Function(dynamic)? onLongPress;
+
+  ChatSessionItem({
+    Key? key,
+    required this.session,
+    this.onTap,
+    this.onLongPress,
+  }) : super(key: key);
+
+  @override
+  _ChatSessionItemState createState() => _ChatSessionItemState();
+}
+
+class _ChatSessionItemState extends BaseStateFulWidgetState<ChatSessionItem> {
+  StreamSubscription? _updateContactSubscription;
+  StreamSubscription? _updateTopicSubscription;
+  StreamSubscription? _updatePrivateGroupSubscription;
+  StreamSubscription? _updateDraftSubscription;
+
+  ContactSchema? _contact;
+  TopicSchema? _topic;
+  PrivateGroupSchema? _privateGroup;
+  MessageSchema? _lastMsg;
+
+  bool loaded = false;
+
+  @override
+  void onRefreshArguments() {
+    loaded = false;
+    // target
+    if (widget.session.isContact) {
+      _refreshContact();
+    } else if (widget.session.isTopic) {
+      _refreshTopic();
+    } else if (widget.session.isPrivateGroup) {
+      _refreshPrivateGroup();
+    }
+    // message
+    Map<String, dynamic>? msgOptions = widget.session.lastMessageOptions;
+    _lastMsg = (msgOptions != null) ? MessageSchema.fromMap(msgOptions) : null;
+    // burning
+    if ((_lastMsg?.deleteAt != null) && ((_lastMsg?.deleteAt ?? 0) > 0)) {
+      _lastMsg = chatCommon.burningTick(_lastMsg!, false);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // contact
+    _updateContactSubscription = contactCommon.updateStream
+        .where((event) => event.address == _contact?.address)
+        .listen((event) {
+      widget.session.temp?["contact"] = event;
+      setState(() {
+        _contact = event;
+      });
+    });
+    // topic
+    _updateTopicSubscription = topicCommon.updateStream
+        .where((event) => event.topicId == _topic?.topicId)
+        .listen((event) {
+      widget.session.temp?["topic"] = event;
+      setState(() {
+        _topic = event;
+      });
+    });
+    // private group
+    _updatePrivateGroupSubscription = privateGroupCommon.updateGroupStream
+        .where((event) => event.groupId == _privateGroup?.groupId)
+        .listen((event) {
+      widget.session.temp?["privateGroup"] = event;
+      setState(() {
+        _privateGroup = event;
+      });
+    });
+    // draft
+    _updateDraftSubscription = memoryCache.draftUpdateStream
+        .where((event) => event == widget.session.targetId)
+        .listen((String event) {
+      setState(() {});
+    });
+  }
+
+  void _refreshContact() {
+    if ((_contact?.address.isNotEmpty == true) &&
+        (_contact?.address == widget.session.targetId)) {
+      loaded = true;
+      return;
+    }
+    if (widget.session.temp?["contact"] == null) {
+      contactCommon.query(widget.session.targetId).then((contact) {
+        if (widget.session.targetId == contact?.address) {
+          if (widget.session.temp == null) widget.session.temp = Map();
+          widget.session.temp?["contact"] = contact;
+          setState(() {
+            loaded = true;
+            _topic = null;
+            _privateGroup = null;
+            _contact = contact;
+          });
+        } else {
+          contact =
+              ContactSchema.create(widget.session.targetId, ContactType.none);
+          setState(() {
+            loaded = true;
+            _topic = null;
+            _privateGroup = null;
+            _contact = contact;
+          });
+        }
+      }); // await
+    } else {
+      loaded = true;
+      _topic = null;
+      _privateGroup = null;
+      _contact = widget.session.temp?["contact"];
+    }
+  }
+
+  void _refreshTopic() {
+    if ((_topic?.topicId.isNotEmpty == true) &&
+        (_topic?.topicId == widget.session.targetId)) {
+      loaded = true;
+      return;
+    }
+    if (widget.session.temp?["topic"] == null) {
+      topicCommon.query(widget.session.targetId).then((topic) {
+        if (widget.session.targetId == topic?.topicId) {
+          if (widget.session.temp == null) widget.session.temp = Map();
+          widget.session.temp?["topic"] = topic;
+          setState(() {
+            loaded = true;
+            _topic = topic;
+            _privateGroup = null;
+            _contact = null;
+          });
+        } else {
+          topic = TopicSchema.create(widget.session.targetId);
+          setState(() {
+            loaded = true;
+            _topic = topic;
+            _privateGroup = null;
+            _contact = null;
+          });
+        }
+      }); // await
+    } else {
+      loaded = true;
+      _topic = widget.session.temp?["topic"];
+      _privateGroup = null;
+      _contact = null;
+    }
+  }
+
+  void _refreshPrivateGroup() {
+    if ((_privateGroup?.groupId.isNotEmpty == true) &&
+        (_privateGroup?.groupId == widget.session.targetId)) {
+      loaded = true;
+      return;
+    }
+    if (widget.session.temp?["privateGroup"] == null) {
+      privateGroupCommon
+          .queryGroup(widget.session.targetId)
+          .then((privateGroup) {
+        if (widget.session.targetId == privateGroup?.groupId) {
+          if (widget.session.temp == null) widget.session.temp = Map();
+          widget.session.temp?["privateGroup"] = privateGroup;
+          setState(() {
+            loaded = true;
+            _topic = null;
+            _privateGroup = privateGroup;
+            _contact = null;
+          });
+        } else {
+          privateGroup = PrivateGroupSchema.create(
+              widget.session.targetId, widget.session.targetId);
+          setState(() {
+            loaded = true;
+            _topic = null;
+            _privateGroup = privateGroup;
+            _contact = null;
+          });
+        }
+      }); // await
+    } else {
+      loaded = true;
+      _topic = null;
+      _privateGroup = widget.session.temp?["privateGroup"];
+      _contact = null;
+    }
+  }
+
+  @override
+  void dispose() {
+    _updateContactSubscription?.cancel();
+    _updateTopicSubscription?.cancel();
+    _updatePrivateGroupSubscription?.cancel();
+    _updateDraftSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // if (loaded && (_contact == null) && (_topic == null) && (_privateGroup == null)) {
+    //   sessionCommon.delete(widget.session.targetId, widget.session.type); // await
+    //   return SizedBox.shrink();
+    // }
+    SessionSchema session = widget.session;
+
+    return Material(
+      color: Colors.transparent,
+      elevation: 0,
+      child: InkWell(
+        onTap: () => widget.onTap?.call(_topic ?? _privateGroup ?? _contact),
+        onLongPress: () =>
+            widget.onLongPress?.call(_topic ?? _privateGroup ?? _contact),
+        child: Container(
+          color: session.isTop
+              ? application.theme.backgroundColor1
+              : Colors.transparent,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          height: 72,
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Expanded(
+                child: _topic != null
+                    ? TopicItem(
+                        topic: _topic!,
+                        body: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.start,
+                              children: [
+                                _topic?.isPrivate == true
+                                    ? Asset.iconSvg(
+                                        'lock',
+                                        width: 18,
+                                        color: application.theme.primaryColor,
+                                      )
+                                    : SizedBox.shrink(),
+                                Expanded(
+                                  child: Label(
+                                    _topic?.displayNameShort ?? " ",
+                                    type: LabelType.h3,
+                                    color: (_topic?.joined == true)
+                                        ? null
+                                        : application.theme.fontColor3,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: _contentWidget(session),
+                            ),
+                          ],
+                        ),
+                        onTapWave: false,
+                      )
+                    : _privateGroup != null
+                        ? PrivateGroupItem(
+                            privateGroup: _privateGroup!,
+                            body: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Row(
+                                  mainAxisAlignment: MainAxisAlignment.start,
+                                  children: [
+                                    Asset.iconSvg(
+                                      'lock',
+                                      width: 18,
+                                      color: application.theme.successColor,
+                                    ),
+                                    Expanded(
+                                      child: Label(
+                                        _privateGroup?.name ?? " ",
+                                        type: LabelType.h3,
+                                        color: (_privateGroup?.joined == true)
+                                            ? null
+                                            : application.theme.fontColor3,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: _contentWidget(session),
+                                ),
+                              ],
+                            ),
+                            onTapWave: false,
+                          )
+                        : (_contact != null
+                            ? ContactItem(
+                                contact: _contact!,
+                                body: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Label(
+                                      _contact?.displayName ?? " ",
+                                      type: LabelType.h3,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 6),
+                                      child: _contentWidget(session),
+                                    ),
+                                  ],
+                                ),
+                                onTapWave: false,
+                              )
+                            : SizedBox(width: 24 * 2, height: 24 * 2)),
+              ),
+              Container(
+                child: Row(
+                  children: [
+                    Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(right: 0, bottom: 6),
+                          child: Label(
+                            Time.formatTime(DateTime.fromMillisecondsSinceEpoch(
+                                session.lastMessageAt)),
+                            type: LabelType.bodyRegular,
+                          ),
+                        ),
+                        (session.unReadCount) > 0
+                            ? Padding(
+                                padding: const EdgeInsets.only(right: 0),
+                                child: _unReadWidget(session),
+                              )
+                            : SizedBox.shrink(),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _contentWidget(SessionSchema session) {
+    String? msgType = _lastMsg?.contentType;
+    if (_lastMsg?.contentType == MessageContentType.ipfs) {
+      int? fileType = MessageOptions.getFileType(_lastMsg?.options);
+      if (fileType == MessageOptions.fileTypeImage) {
+        msgType = MessageContentType.image;
+      } else if (fileType == MessageOptions.fileTypeVideo) {
+        msgType = MessageContentType.video;
+      } else {
+        // ipfs_file + ipfs_audio
+        msgType = MessageContentType.file;
+      }
+    }
+
+    String? draft = memoryCache.getDraft(session.targetId);
+    String contactName = _contact?.displayName ?? " ";
+    String senderName = widget.session.data["senderName"]?.toString() ??
+        ContactSchema.getDefaultName(
+            _contact?.address ?? session.lastMessageOptions?["sender"]);
+    String who = (_lastMsg?.isOutbound == true)
+        ? Settings.locale((s) => s.you, ctx: context)
+        : (((_lastMsg?.isTargetTopic == true) ||
+                (_lastMsg?.isTargetGroup == true))
+            ? senderName
+            : contactName);
+    String prefix = (_lastMsg?.isOutbound == true)
+        ? ""
+        : (((_lastMsg?.isTargetTopic == true) ||
+                (_lastMsg?.isTargetGroup == true))
+            ? "$senderName: "
+            : "");
+    String whoPrefix = (_lastMsg?.isOutbound == true)
+        ? Settings.locale((s) => s.you, ctx: context)
+        : (((_lastMsg?.isTargetTopic == true) ||
+                (_lastMsg?.isTargetGroup == true))
+            ? "$senderName "
+            : "");
+
+    Widget contentWidget;
+    if (draft != null && draft.length > 0) {
+      // draft
+      contentWidget = Row(
+        children: <Widget>[
+          Label(
+            Settings.locale((s) => s.placeholder_draft, ctx: context),
+            type: LabelType.bodyRegular,
+            color: Colors.red,
+            overflow: TextOverflow.ellipsis,
+          ),
+          SizedBox(width: 5),
+          Label(
+            draft,
+            type: LabelType.bodyRegular,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      );
+    } else if (msgType == MessageContentType.contactOptions) {
+      Map<String, dynamic> optionData =
+          _lastMsg?.content ?? Map<String, dynamic>();
+      Map<String, dynamic> content =
+          optionData['content'] ?? Map<String, dynamic>();
+      if (content.keys.length <= 0) return SizedBox.shrink();
+      String? optionType = optionData['optionType']?.toString();
+      String? deviceToken = content['deviceToken'] as String?;
+      int? deleteAfterSeconds = content['deleteAfterSeconds'] as int?;
+
+      bool isBurn = (optionType == '0') || (deleteAfterSeconds != null);
+      bool isBurnOpen = deleteAfterSeconds != null && deleteAfterSeconds > 0;
+
+      bool isDeviceToken =
+          (optionType == '1') || (deviceToken?.isNotEmpty == true);
+      bool isDeviceTokenOPen = deviceToken?.isNotEmpty == true;
+
+      if (isBurn) {
+        String burnDecs =
+            ' ${isBurnOpen ? Settings.locale((s) => s.update_burn_after_reading, ctx: context) : Settings.locale((s) => s.close_burn_after_reading, ctx: context)} ';
+        contentWidget = Label(
+          who + burnDecs,
+          type: LabelType.bodyRegular,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        );
+      } else if (isDeviceToken) {
+        String deviceDesc = isDeviceTokenOPen
+            ? ' ${Settings.locale((s) => s.setting_accept_notification, ctx: context)}'
+            : ' ${Settings.locale((s) => s.setting_deny_notification, ctx: context)}';
+        contentWidget = Label(
+          who + deviceDesc,
+          type: LabelType.bodyRegular,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        );
+      } else {
+        contentWidget = SizedBox.shrink();
+      }
+    } else if (msgType == MessageContentType.image) {
+      contentWidget = Padding(
+        padding: const EdgeInsets.only(top: 0),
+        child: Row(
+          children: <Widget>[
+            Label(prefix,
+                type: LabelType.bodyRegular,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            Asset.iconSvg('image',
+                width: 16, color: application.theme.fontColor2),
+          ],
+        ),
+      );
+    } else if (msgType == MessageContentType.audio) {
+      contentWidget = Padding(
+        padding: const EdgeInsets.only(top: 0),
+        child: Row(
+          children: <Widget>[
+            Label(prefix,
+                type: LabelType.bodyRegular,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            Asset.iconSvg('microphone',
+                width: 16, color: application.theme.fontColor2),
+          ],
+        ),
+      );
+    } else if (msgType == MessageContentType.video) {
+      contentWidget = Padding(
+        padding: const EdgeInsets.only(top: 0),
+        child: Row(
+          children: <Widget>[
+            Label(prefix,
+                type: LabelType.bodyRegular,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            Icon(CupertinoIcons.video_camera,
+                size: 18, color: application.theme.fontColor2),
+          ],
+        ),
+      );
+    } else if (msgType == MessageContentType.file) {
+      contentWidget = Padding(
+        padding: const EdgeInsets.only(top: 0),
+        child: Row(
+          children: <Widget>[
+            Label(prefix,
+                type: LabelType.bodyRegular,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis),
+            Icon(CupertinoIcons.doc,
+                size: 16, color: application.theme.fontColor2),
+          ],
+        ),
+      );
+    } else if ((msgType == MessageContentType.topicSubscribe) ||
+        (msgType == MessageContentType.privateGroupSubscribe)) {
+      contentWidget = Label(
+        whoPrefix + Settings.locale((s) => s.joined_channel, ctx: context),
+        type: LabelType.bodyRegular,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    } else if ((msgType == MessageContentType.topicInvitation) ||
+        (msgType == MessageContentType.privateGroupInvitation)) {
+      contentWidget = Label(
+        Settings.locale((s) => s.channel_invitation, ctx: context),
+        type: LabelType.bodyRegular,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    } else if (_lastMsg?.content is String?) {
+      contentWidget = Label(
+        prefix + ((_lastMsg?.content as String?)?.trim() ?? " "),
+        type: LabelType.bodyRegular,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    } else {
+      contentWidget = Label(
+        prefix + " ",
+        type: LabelType.bodyRegular,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      );
+    }
+    return contentWidget;
+  }
+
+  Widget _unReadWidget(SessionSchema session) {
+    String countStr = session.unReadCount.toString();
+    if ((session.unReadCount) > 99) {
+      countStr = '99+';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 3),
+      constraints: BoxConstraints(minWidth: 24, minHeight: 24),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        color: application.theme.badgeColor,
+      ),
+      child: Center(
+        child: Label(
+          countStr,
+          type: LabelType.bodySmall,
+          dark: true,
+        ),
+      ),
+    );
+  }
+}

@@ -1,0 +1,154 @@
+import 'package:nchat_mobile/common/settings.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:nchat_mobile/components/base/stateful.dart';
+import 'package:nchat_mobile/components/button/button.dart';
+import 'package:nchat_mobile/components/layout/layout.dart';
+import 'package:nchat_mobile/components/text/label.dart';
+import 'package:nchat_mobile/components/tip/toast.dart';
+import 'package:nchat_mobile/helpers/file.dart';
+import 'package:nchat_mobile/utils/asset.dart';
+import 'package:nchat_mobile/utils/logger.dart';
+import 'package:nchat_mobile/utils/path.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:photo_view/photo_view.dart';
+import 'dart:io';
+
+class PhotoScreen extends BaseStateFulWidget {
+  static final String routeName = "/photo";
+  static final String argFilePath = "file_path";
+  static final String argNetUrl = "net_url";
+
+  static Future go(BuildContext? context, {String? filePath, String? netUrl}) {
+    if (context == null) return Future.value(null);
+    if ((filePath == null || filePath.isEmpty) && (netUrl == null || netUrl.isEmpty)) return Future.value(null);
+    return Navigator.pushNamed(context, routeName, arguments: {
+      argFilePath: filePath,
+      argNetUrl: netUrl,
+    });
+  }
+
+  final Map<String, dynamic>? arguments;
+
+  PhotoScreen({Key? key, this.arguments}) : super(key: key);
+
+  @override
+  _PhotoScreenState createState() => _PhotoScreenState();
+}
+
+class _PhotoScreenState extends BaseStateFulWidgetState<PhotoScreen> with SingleTickerProviderStateMixin {
+  static const int TYPE_FILE = 1;
+  static const int TYPE_NET = 2;
+
+  int? _contentType;
+  String? _content;
+
+  @override
+  void onRefreshArguments() {
+    String? filePath = widget.arguments?[PhotoScreen.argFilePath];
+    String? netUrl = widget.arguments?[PhotoScreen.argNetUrl];
+    if (filePath != null && filePath.isNotEmpty) {
+      _contentType = TYPE_FILE;
+      _content = filePath;
+    } else if (netUrl != null && netUrl.isNotEmpty) {
+      _contentType = TYPE_NET;
+      _content = netUrl;
+    }
+  }
+
+  Future _save() async {
+    Toast.show("Saving to gallery is temporarily disabled.");
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double btnSize = Settings.screenWidth() / 10;
+    double iconSize = Settings.screenWidth() / 15;
+
+    ImageProvider? provider;
+    if (this._contentType == TYPE_FILE) {
+      provider = FileImage(File(this._content ?? ""));
+    } else if (this._contentType == TYPE_NET) {
+      provider = NetworkImage(this._content ?? "");
+    }
+
+    return Layout(
+      bodyColor: Colors.black,
+      headerColor: Colors.black,
+      borderRadius: BorderRadius.zero,
+      body: InkWell(
+        onTap: () {
+          if (Navigator.of(this.context).canPop()) Navigator.pop(this.context);
+        },
+        child: Stack(
+          children: [
+            PhotoView(imageProvider: provider),
+            Positioned(
+              left: 0,
+              right: 0,
+              top: Platform.isAndroid ? 45 : 30,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  SizedBox(width: btnSize / 4),
+                  Button(
+                    width: btnSize,
+                    height: btnSize,
+                    backgroundColor: Colors.transparent,
+                    padding: EdgeInsets.symmetric(horizontal: 0, vertical: 0),
+                    child: Container(
+                      width: btnSize,
+                      height: btnSize,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(60),
+                        borderRadius: BorderRadius.all(Radius.circular(btnSize / 2)),
+                      ),
+                      child: Icon(
+                        CupertinoIcons.back,
+                        color: Colors.white,
+                        size: iconSize,
+                      ),
+                    ),
+                    onPressed: () {
+                      if (Navigator.of(this.context).canPop()) Navigator.pop(this.context);
+                    },
+                  ),
+                  Spacer(),
+                  Container(
+                    width: btnSize,
+                    height: btnSize,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withAlpha(60),
+                      borderRadius: BorderRadius.all(Radius.circular(btnSize / 2)),
+                    ),
+                    child: PopupMenuButton(
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      icon: Asset.iconSvg('more', width: 24),
+                      onSelected: (int result) async {
+                        switch (result) {
+                          case 0:
+                            await _save();
+                            break;
+                        }
+                      },
+                      itemBuilder: (BuildContext context) => <PopupMenuEntry<int>>[
+                        PopupMenuItem<int>(
+                          value: 0,
+                          child: Label(
+                            Settings.locale((s) => s.save_to_album, ctx: context),
+                            type: LabelType.display,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(width: btnSize / 4),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

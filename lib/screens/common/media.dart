@@ -1,0 +1,516 @@
+import 'package:nchat_mobile/common/settings.dart';
+import 'dart:async';
+import 'dart:io';
+//
+
+import 'package:dismissible_page/dismissible_page.dart';
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'package:nchat_mobile/components/base/stateful.dart';
+import 'package:nchat_mobile/components/button/button.dart';
+import 'package:nchat_mobile/components/tip/toast.dart';
+//
+import 'package:nchat_mobile/utils/logger.dart';
+import 'package:nchat_mobile/utils/parallel_queue.dart';
+import 'package:photo_view/photo_view.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:synchronized/synchronized.dart';
+
+class MediaScreen extends BaseStateFulWidget {
+  static final String routeName = "/media";
+  static final String argMedias = "medias";
+  static final String argTarget = "target";
+  static final String argLeftMsgId = "leftMsgId";
+  static final String argRightMsgId = "rightMsgId";
+
+  static Future go(BuildContext? context, List<Map<String, dynamic>>? medias,
+      {String? target, String? leftMsgId, String? rightMsgId}) {
+    if (context == null) return Future.value(null);
+    if (medias == null || medias.isEmpty) return Future.value(null);
+    if (leftMsgId == null && rightMsgId != null) leftMsgId = rightMsgId;
+    if (rightMsgId == null && leftMsgId != null) rightMsgId = leftMsgId;
+    return Navigator.push(
+      context,
+      PageRouteBuilder(
+        opaque: false,
+        transitionDuration: Duration(milliseconds: 200),
+        pageBuilder: (context, animation, secondaryAnimation) {
+          return FadeTransition(
+            opacity: animation,
+            child: MediaScreen(
+              arguments: {
+                argMedias: medias,
+                argTarget: target,
+                argLeftMsgId: leftMsgId,
+                argRightMsgId: rightMsgId,
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  final Map<String, dynamic>? arguments;
+
+  MediaScreen({Key? key, this.arguments}) : super(key: key);
+
+  @override
+  _MediaScreenState createState() => _MediaScreenState();
+
+  // ignore: close_sinks
+  static StreamController<List<Map<String, dynamic>>> _onFetchController =
+      StreamController<List<Map<String, dynamic>>>.broadcast();
+  static StreamSink<List<Map<String, dynamic>>> get onFetchSink =>
+      _onFetchController.sink;
+  static Stream<List<Map<String, dynamic>>> get onFetchStream =>
+      _onFetchController.stream;
+
+  static List<Map<String, dynamic>>? createFetchRequest(
+      String? target, bool isLeft, String? msgId) {
+    if (target == null || target.isEmpty) return null;
+    return [
+      {"type": "request", "target": target, "isLeft": isLeft, "msgId": msgId}
+    ];
+  }
+
+  static createFetchResponse(String? target, bool isLeft, String? msgId,
+      List<Map<String, dynamic>> medias) {
+    List<Map<String, dynamic>> data = [];
+    data.add({
+      "type": "response",
+      "target": target,
+      "isLeft": isLeft,
+      "msgId": msgId
+    });
+    data.addAll(medias);
+    return data;
+  }
+
+  static Map<String, dynamic>? createMediasItemByImagePath(
+      String? id, String? imagePath) {
+    if (imagePath == null || imagePath.isEmpty) return null;
+    return {
+      "id": id,
+      "mediaType": "image",
+      "contentType": "path",
+      "content": imagePath,
+    };
+  }
+
+  static Map<String, dynamic>? createMediasItemByVideoPath(
+      String? id, String? contentPath, String? thumbnailPath) {
+    if (contentPath == null || contentPath.isEmpty) return null;
+    return {
+      "id": id,
+      "mediaType": "video",
+      "contentType": "path",
+      "content": contentPath,
+      "thumbnail": thumbnailPath,
+    };
+  }
+}
+
+class _MediaScreenState extends BaseStateFulWidgetState<MediaScreen>
+    with SingleTickerProviderStateMixin {
+  final double dragQuitOffsetY = Settings.screenHeight() / 6;
+
+  ParallelQueue _queue = ParallelQueue("media_fetch",
+      onLog: (log, error) => error ? logger.w(log) : null);
+  StreamSubscription? _onFetchMediasSubscription;
+
+  PageController? _pageController;
+  List<Map<String, dynamic>> _medias = [];
+  int _dataIndex = 0;
+  final int fetchLimit = 3;
+
+  String? _target;
+  String? _leftMsgId;
+  bool _leftFetchLoading = false;
+  String? _rightMsgId;
+  bool _rightFetchLoading = false;
+
+  Lock _mediaLoadLock = new Lock();
+  String? currentMediaType;
+
+  PhotoViewScaleStateController? _imageScaleController;
+  int? _imageInitIndex;
+
+  bool hideComponents = false;
+
+  @override
+  void onRefreshArguments() {
+    _target = widget.arguments?[MediaScreen.argTarget]?.toString();
+    _leftMsgId = widget.arguments?[MediaScreen.argLeftMsgId]?.toString();
+    _rightMsgId = widget.arguments?[MediaScreen.argRightMsgId]?.toString();
+    _medias = widget.arguments?[MediaScreen.argMedias] ?? _medias;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController(initialPage: _dataIndex);
+    // fetch
+    _onFetchMediasSubscription = MediaScreen.onFetchStream.listen((response) {
+      if (response.isEmpty || response[0].isEmpty) return;
+      String type = response[0]["type"]?.toString() ?? "";
+      if (type != "response") return;
+      String target = response[0]["target"]?.toString() ?? "";
+      if (target != _target) return;
+      bool isLeft = response[0]["isLeft"] ?? true;
+      String msgId = response[0]["msgId"]?.toString() ?? "";
+      var medias = response..removeAt(0);
+      if (medias.isEmpty) return;
+      _queue.add(() async {
+        if (isLeft) {
+          if (!_leftFetchLoading) return;
+          setState(() {
+            _leftMsgId = msgId;
+            _dataIndex = _dataIndex + medias.length;
+            _medias.insertAll(0, medias.reversed);
+            _pageController?.jumpToPage(_dataIndex);
+          });
+          _leftFetchLoading = false;
+        } else {
+          if (!_rightFetchLoading) return;
+          setState(() {
+            _rightMsgId = msgId;
+            // _dataIndex = _dataIndex;
+            _medias.addAll(medias.reversed);
+            // _pageController?.jumpToPage(_dataIndex);
+          });
+          _rightFetchLoading = false;
+        }
+      });
+    });
+    // data
+    _tryFetchMedias();
+    // media
+    _loadMedia(_dataIndex); // await
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
+    _imageScaleController?.dispose();
+    _pageController?.dispose();
+    _onFetchMediasSubscription?.cancel();
+  }
+
+  void _tryFetchMedias() {
+    if ((_dataIndex + 1) <= fetchLimit) {
+      if (!_leftFetchLoading) {
+        _leftFetchLoading = true;
+        List<Map<String, dynamic>>? request =
+            MediaScreen.createFetchRequest(_target, true, _leftMsgId);
+        if (request != null) MediaScreen.onFetchSink.add(request);
+      }
+    }
+    if (_dataIndex >= (_medias.length - fetchLimit)) {
+      if (!_rightFetchLoading) {
+        _rightFetchLoading = true;
+        List<Map<String, dynamic>>? request =
+            MediaScreen.createFetchRequest(_target, false, _rightMsgId);
+        if (request != null) MediaScreen.onFetchSink.add(request);
+      }
+    }
+  }
+
+  Future _loadMedia(int index) async {
+    // logger.i("-----> 333 - index:$index - size:${_medias.length}");
+    _imageScaleController?.reset();
+    if ((index < 0) || (index >= _medias.length)) return null;
+    Map<String, dynamic>? media = _medias[index];
+    if (media.isEmpty) return;
+    String mediaType = media["mediaType"] ?? "";
+    String content = media["content"] ?? "";
+    if (content.isEmpty) return;
+    String contentType = media["contentType"] ?? "";
+    if (mediaType != currentMediaType) {
+      setState(() {
+        currentMediaType = mediaType;
+      });
+    }
+    await _mediaLoadLock.synchronized(() async {
+      if (mediaType == "image") {
+        if (_imageInitIndex == index) return;
+        if (_imageScaleController == null) {
+          _imageScaleController = PhotoViewScaleStateController();
+        }
+        if (contentType == "path") {
+          if (_imageInitIndex == index) return;
+          // nothing
+          _imageInitIndex = index;
+        } else {
+          // nothing
+        }
+      }
+    });
+  }
+
+  Future _save(int index) async {
+    Toast.show("Saving to gallery is temporarily disabled.");
+  }
+
+  Future _share(int index) async {
+    // data
+    if ((index < 0) || (index >= _medias.length)) return null;
+    Map<String, dynamic>? media = _medias[index];
+    if (media.isEmpty) return null;
+    String mediaType = media["mediaType"] ?? "";
+    String contentType = media["contentType"] ?? "";
+    String content = media["content"] ?? "";
+    // share
+    if (mediaType == "image") {
+      if ((contentType == "path") && content.isNotEmpty) {
+        File file = File(content);
+        if (!file.existsSync()) return;
+        logger.i("MediaScreen - share image file - path:${file.path}");
+        String mimeType = Platform.isAndroid ? "image/*" : "image/jpeg";
+        XFile xFile = XFile(file.path, mimeType: mimeType);
+        Share.shareXFiles([xFile]);
+      }
+    } else if (mediaType == "video") {
+      if ((contentType == "path") && content.isNotEmpty) {
+        File file = File(content);
+        if (!file.existsSync()) return;
+        logger.i("MediaScreen - share video file - path:${file.path}");
+        String mimeType = Platform.isAndroid ? "video/*" : "video/mp4";
+        XFile xFile = XFile(file.path, mimeType: mimeType);
+        Share.shareXFiles([xFile]);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    double iconSize = Settings.screenWidth() / 20;
+    double btnSize = Settings.screenWidth() / 10;
+    double btnPad = btnSize * 0.2;
+    double playSize = Settings.screenWidth() / 5;
+    // logger.i("-----> 000 - index:$_dataIndex - size:${_medias.length}");
+    return Stack(
+      children: [
+        DismissiblePage(
+          isFullScreen: true,
+          backgroundColor: Colors.black,
+          hitTestBehavior: HitTestBehavior.opaque,
+          direction: DismissiblePageDismissDirection.multi,
+          minScale: .70,
+          reverseDuration: const Duration(milliseconds: 200),
+          onDismissed: () {
+            if (Navigator.of(this.context).canPop())
+              Navigator.pop(this.context);
+          },
+          onDragUpdate: (info) {
+            if ((hideComponents == false) && (info.overallDragValue > 0)) {
+              setState(() {
+                hideComponents = true;
+              });
+            } else if ((hideComponents == true) &&
+                (info.overallDragValue <= 0)) {
+              setState(() {
+                hideComponents = false;
+              });
+            }
+          },
+          child: PhotoViewGestureDetectorScope(
+            axis: Axis.horizontal,
+            child: PageView.builder(
+              allowImplicitScrolling: true,
+              controller: _pageController,
+              itemCount: _medias.length,
+              onPageChanged: (index) {
+                // logger.i("-----> 222 - index:$index - size:${_medias.length}");
+                if ((index < 0) || (index >= _medias.length)) return;
+                setState(() {
+                  _dataIndex = index;
+                  hideComponents = false;
+                });
+                _loadMedia(index); // await
+                _tryFetchMedias();
+              },
+              itemBuilder: (BuildContext context, int index) {
+                // logger.i("-----> 111 - index:$index  - size:${_medias.length}");
+                if ((index < 0) || (index >= _medias.length))
+                  return SizedBox.shrink();
+                Map<String, dynamic>? media = _medias[index];
+                if (media.isEmpty) return SizedBox.shrink();
+                String mediaType = media["mediaType"] ?? "";
+                String contentType = media["contentType"] ?? "";
+                String content = media["content"] ?? "";
+                String thumbnail = media["thumbnail"] ?? "";
+                // widget
+                Widget child;
+                if (content.isEmpty) {
+                  child = SizedBox.shrink();
+                } else if (mediaType == "image") {
+                  if (contentType == "path") {
+                    child = PhotoView(
+                        onTapUp: (BuildContext context, TapUpDetails details,
+                            PhotoViewControllerValue controllerValue) {
+                          if (Navigator.of(this.context).canPop())
+                            Navigator.pop(this.context);
+                        },
+                        imageProvider: FileImage(File(content)),
+                        backgroundDecoration:
+                            const BoxDecoration(color: Colors.transparent),
+                        scaleStateController: _imageScaleController,
+                        loadingBuilder: (context, event) {
+                          return SpinKitRing(
+                            color: Colors.white,
+                            lineWidth: btnSize / 10,
+                            size: btnSize,
+                          );
+                        });
+                  } else {
+                    child = SizedBox.shrink();
+                  }
+                } else if (mediaType == "video") {
+                  if (contentType == "path") {
+                    child = Stack(children: [
+                      (thumbnail.isNotEmpty)
+                          ? Positioned(
+                              left: 0,
+                              right: 0,
+                              top: 0,
+                              bottom: 0,
+                              child: Container(
+                                constraints: BoxConstraints(),
+                                child: Image.file(
+                                  File(thumbnail),
+                                  fit: BoxFit.contain,
+                                ),
+                              ),
+                            )
+                          : Center(
+                              child: Icon(
+                                CupertinoIcons.video_camera,
+                                size: playSize / 1.2,
+                                color: Colors.white,
+                              ),
+                            ),
+                      Positioned(
+                        left: 0,
+                        right: 0,
+                        top: 0,
+                        bottom: 0,
+                        child: Icon(
+                          CupertinoIcons.play_circle,
+                          size: playSize,
+                          color: Colors.white,
+                        ),
+                      ),
+                      GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: () {
+                          Toast.show(
+                              "Video preview is not available in this build.");
+                        },
+                        child: SizedBox.expand(),
+                      ),
+                    ]);
+                  } else {
+                    child = SizedBox.shrink();
+                  }
+                } else {
+                  child = SizedBox.shrink();
+                }
+                return child;
+              },
+            ),
+          ),
+        ),
+        // bottom
+        hideComponents
+            ? SizedBox.shrink()
+            : Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Row(
+                  mainAxisSize: MainAxisSize.max,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    SizedBox(width: iconSize - btnPad),
+                    currentMediaType == "video"
+                        ? Button(
+                            width: btnSize + btnPad * 2,
+                            height: btnSize + btnPad * 2,
+                            backgroundColor: Colors.transparent,
+                            padding: EdgeInsets.symmetric(
+                                horizontal: btnPad, vertical: btnPad),
+                            child: Container(
+                              width: btnSize,
+                              height: btnSize,
+                              decoration: BoxDecoration(
+                                color: Colors.white.withAlpha(80),
+                                borderRadius: BorderRadius.all(
+                                    Radius.circular(btnSize / 2)),
+                              ),
+                              child: Icon(
+                                Icons.close,
+                                color: Colors.white,
+                                size: iconSize,
+                              ),
+                            ),
+                            onPressed: () {
+                              if (Navigator.of(this.context).canPop())
+                                Navigator.pop(this.context);
+                            },
+                          )
+                        : SizedBox.shrink(),
+                    Spacer(),
+                    Button(
+                      width: btnSize + btnPad * 2,
+                      height: btnSize + btnPad * 2,
+                      backgroundColor: Colors.transparent,
+                      padding: EdgeInsets.symmetric(
+                          horizontal: btnPad, vertical: btnPad),
+                      child: Container(
+                        width: btnSize,
+                        height: btnSize,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(80),
+                          borderRadius:
+                              BorderRadius.all(Radius.circular(btnSize / 2)),
+                        ),
+                        child: Icon(
+                          Icons.share,
+                          color: Colors.white,
+                          size: iconSize,
+                        ),
+                      ),
+                      onPressed: () => _share(_dataIndex),
+                    ),
+                    Button(
+                      width: btnSize + btnPad * 2,
+                      height: btnSize + btnPad * 2,
+                      backgroundColor: Colors.transparent,
+                      padding: EdgeInsets.symmetric(
+                          horizontal: btnPad, vertical: btnPad),
+                      child: Container(
+                        width: btnSize,
+                        height: btnSize,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withAlpha(80),
+                          borderRadius:
+                              BorderRadius.all(Radius.circular(btnSize / 2)),
+                        ),
+                        child: Icon(
+                          CupertinoIcons.arrow_down_to_line,
+                          color: Colors.white,
+                          size: iconSize,
+                        ),
+                      ),
+                      onPressed: () => _save(_dataIndex),
+                    ),
+                    SizedBox(width: iconSize - btnPad),
+                  ],
+                ),
+              ),
+      ],
+    );
+  }
+}

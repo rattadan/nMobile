@@ -1,0 +1,590 @@
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_spinkit/flutter_spinkit.dart';
+import 'package:nchat_mobile/common/client/client.dart';
+import 'package:nchat_mobile/common/locator.dart';
+import 'package:nchat_mobile/common/settings.dart';
+import 'package:nchat_mobile/common/push/badge.dart' as Badge;
+import 'package:nchat_mobile/components/base/stateful.dart';
+import 'package:nchat_mobile/components/button/button.dart';
+import 'package:nchat_mobile/components/chat/session_item.dart';
+import 'package:nchat_mobile/components/dialog/modal.dart';
+import 'package:nchat_mobile/components/text/label.dart';
+import 'package:nchat_mobile/schema/contact.dart';
+import 'package:nchat_mobile/schema/message.dart';
+import 'package:nchat_mobile/schema/session.dart';
+import 'package:nchat_mobile/screens/chat/messages.dart';
+import 'package:nchat_mobile/screens/chat/no_message.dart';
+import 'package:nchat_mobile/storages/settings.dart';
+import 'package:nchat_mobile/utils/asset.dart';
+import 'package:nchat_mobile/utils/logger.dart';
+import 'package:nchat_mobile/utils/parallel_queue.dart';
+import 'package:nchat_mobile/utils/util.dart';
+
+class ChatSessionListLayout extends BaseStateFulWidget {
+  ContactSchema current;
+
+  ChatSessionListLayout(this.current);
+
+  @override
+  _ChatSessionListLayoutState createState() => _ChatSessionListLayoutState();
+}
+
+class _ChatSessionListLayoutState
+    extends BaseStateFulWidgetState<ChatSessionListLayout> {
+  StreamSubscription? _clientStatusChangeSubscription;
+  StreamSubscription? _appLifeChangeSubscription;
+  StreamSubscription? _contactCurrentUpdateSubscription;
+  StreamSubscription? _sessionAddSubscription;
+  StreamSubscription? _sessionDeleteSubscription;
+  StreamSubscription? _sessionUpdateSubscription;
+  StreamSubscription? _onMessageUpdateStreamSubscription;
+  StreamSubscription? _onMessageDeleteStreamSubscription;
+
+  ContactSchema? _current;
+
+  ParallelQueue _queue = ParallelQueue("session_list",
+      onLog: (log, error) => error ? logger.w(log) : null);
+
+  bool _moreLoading = false;
+  ScrollController _scrollController = ScrollController();
+  List<SessionSchema> _sessionList = [];
+
+  int clientConnectStatus = ClientConnectStatus.connecting;
+  bool clientConnectingVisible = false;
+
+  bool _isLoaded = false;
+  bool _isShowTip = false;
+
+  @override
+  void onRefreshArguments() {
+    bool sameUser = _current?.id == widget.current.id;
+    _current = widget.current;
+    if (!sameUser) {
+      _getDataSessions(true);
+    }
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    // clientStatus
+    _clientStatusChangeSubscription = clientCommon.statusStream
+        .distinct((prev, next) => prev == next)
+        .listen((int status) {
+      clientConnectStatus = status;
+      if ((clientConnectStatus == ClientConnectStatus.connecting) ||
+          (clientConnectStatus == ClientConnectStatus.connectPing)) {
+        Future.delayed(Duration(seconds: 10)).then((value) {
+          setState(() {
+            clientConnectingVisible =
+                (clientConnectStatus == ClientConnectStatus.connecting) ||
+                    (clientConnectStatus == ClientConnectStatus.connectPing);
+          });
+        });
+      } else {
+        setState(() {
+          clientConnectingVisible = false;
+        });
+      }
+    });
+
+    // appLife
+    _appLifeChangeSubscription =
+        application.appLifeStream.listen((bool inBackground) {
+      if (inBackground) {
+        _refreshBadge(delayMs: 0);
+      } else {
+        _refreshBadge(delayMs: 1000);
+      }
+    });
+
+    // session
+    _sessionAddSubscription =
+        sessionCommon.addStream.listen((SessionSchema event) {
+      _sessionSet(event).then((_) {
+        setState(() {});
+      });
+    });
+    _sessionDeleteSubscription = sessionCommon.deleteStream.listen((values) {
+      _sessionDel(values[0], values[1]).then((_) {
+        setState(() {});
+      });
+    });
+    _sessionUpdateSubscription =
+        sessionCommon.updateStream.listen((SessionSchema event) {
+      _sessionSet(event).then((_) {
+        setState(() {});
+      });
+    });
+
+    // message
+    _onMessageUpdateStreamSubscription =
+        messageCommon.onUpdateStream.listen((message) {
+      _onMessageUpdate(message);
+    });
+    _onMessageDeleteStreamSubscription =
+        messageCommon.onDeleteStream.listen((String msgId) {
+      _onMessageDelete(msgId);
+    });
+
+    // scroll
+    _scrollController.addListener(() {
+      if (_moreLoading) return;
+      double offsetFromBottom = _scrollController.position.maxScrollExtent -
+          _scrollController.position.pixels;
+      if (offsetFromBottom < 50) {
+        _moreLoading = true;
+        _getDataSessions(false).then((v) {
+          _moreLoading = false;
+        });
+      }
+    });
+
+    // tip
+    SettingsStorage.getSettings(SettingsStorage.CHAT_TIP_STATUS).then((value) {
+      bool dismiss = (value.toString() == "true") || (value == true);
+      setState(() {
+        _isShowTip = !dismiss;
+      });
+    });
+
+    // unread
+    _refreshBadge(delayMs: 1000);
+  }
+
+  @override
+  void dispose() {
+    _clientStatusChangeSubscription?.cancel();
+    _appLifeChangeSubscription?.cancel();
+    _contactCurrentUpdateSubscription?.cancel();
+    _sessionAddSubscription?.cancel();
+    _sessionDeleteSubscription?.cancel();
+    _sessionUpdateSubscription?.cancel();
+    _onMessageUpdateStreamSubscription?.cancel();
+    _onMessageDeleteStreamSubscription?.cancel();
+    super.dispose();
+  }
+
+  _refreshBadge({int? delayMs}) async {
+    if (delayMs != null) await Future.delayed(Duration(milliseconds: delayMs));
+    int unread = await sessionCommon.totalUnReadCount();
+    Badge.Badge.refreshCount(count: unread);
+  }
+
+  _getDataSessions(bool refresh) async {
+    int _offset = 0;
+    if (refresh) {
+      _sessionList = [];
+    } else {
+      _offset = _sessionList.length;
+    }
+    var sessions =
+        await sessionCommon.queryListRecent(offset: _offset, limit: 20);
+    setState(() {
+      _isLoaded = true;
+      _sessionList += sessions;
+    });
+  }
+
+  Future _onMessageUpdate(MessageSchema msg) async {
+    SessionSchema? session = await _sessionQuery(msg.msgId);
+    if (session == null) return;
+    await sessionCommon.update(session.targetId, session.type, lastMsg: msg);
+  }
+
+  Future _onMessageDelete(String msgId) async {
+    SessionSchema? session = await _sessionQuery(msgId);
+    if (session == null) return;
+    await sessionCommon.update(session.targetId, session.type,
+        lastMsgAt: session.lastMessageAt);
+  }
+
+  Future _sessionSet(SessionSchema s) async {
+    await _queue.add(() async {
+      if (_sessionList
+          .where((element) =>
+              (element.targetId == s.targetId) && (element.type == s.type))
+          .toList()
+          .isEmpty) {
+        _sessionList.insert(0, s);
+      } else {
+        _sessionList = _sessionList
+            .map((SessionSchema e) =>
+                ((e.targetId == s.targetId) && (e.type == s.type)) ? s : e)
+            .toList();
+      }
+      _sessionList.sort((a, b) => a.isTop
+          ? (b.isTop ? (b.lastMessageAt).compareTo((a.lastMessageAt)) : -1)
+          : (b.isTop ? 1 : b.lastMessageAt.compareTo(a.lastMessageAt)));
+    });
+  }
+
+  Future _sessionDel(String targetId, int targetType) async {
+    await _queue.add(() async {
+      _sessionList = _sessionList
+          .where((element) =>
+              !((element.targetId == targetId) && (element.type == targetType)))
+          .toList();
+    });
+  }
+
+  Future<SessionSchema?> _sessionQuery(String msgId) async {
+    return await _queue.add(() async {
+      SessionSchema? session;
+      for (var i = 0; i < _sessionList.length; i++) {
+        SessionSchema index = _sessionList[i];
+        if ((index.lastMessageOptions != null) &&
+            (index.lastMessageOptions!["msg_id"] == msgId)) {
+          session = index;
+          break;
+        }
+      }
+      return session;
+    });
+  }
+
+  _popItemMenu(SessionSchema item, int index) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (BuildContext context) {
+        return Container(
+          decoration: BoxDecoration(
+            color: application.theme.backgroundColor,
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(28),
+              topRight: Radius.circular(28),
+            ),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                margin: EdgeInsets.symmetric(vertical: 12),
+                width: 36,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: application.theme.fontColor4.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+
+              // Header
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 8),
+                child: Row(
+                  children: [
+                    Text(
+                      'Chat Options',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                        color: application.theme.fontColor1,
+                      ),
+                    ),
+                    Spacer(),
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      icon: Icon(
+                        CupertinoIcons.xmark,
+                        color: application.theme.fontColor3,
+                        size: 24,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // Menu options
+              Padding(
+                padding: EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                child: Column(
+                  children: [
+                    // Top/Unpin option
+                    _buildMenuOption(
+                      icon: item.isTop
+                          ? Icons.vertical_align_bottom
+                          : Icons.vertical_align_top,
+                      title: item.isTop ? 'Unpin Chat' : 'Pin Chat',
+                      subtitle: item.isTop ? 'Remove from top' : 'Keep at top',
+                      color: Color(0xFF007AFF),
+                      onTap: () async {
+                        Navigator.of(context).pop();
+                        bool top = !item.isTop;
+                        sessionCommon.setTop(item.targetId, item.type, top,
+                            notify: true);
+                      },
+                    ),
+
+                    SizedBox(height: 12),
+
+                    // Delete option
+                    _buildMenuOption(
+                      icon: Icons.delete_outline,
+                      title: 'Delete Chat',
+                      subtitle: 'Remove conversation',
+                      color: Color(0xFFFF3B30),
+                      onTap: () async {
+                        Navigator.of(context).pop();
+                        ModalDialog.of(Settings.appContext).confirm(
+                          content: Settings.locale(
+                              (s) => s.delete_session_confirm_title,
+                              ctx: context),
+                          hasCloseButton: true,
+                          agree: Button(
+                            width: double.infinity,
+                            text: Settings.locale((s) => s.delete_session,
+                                ctx: context),
+                            backgroundColor: application.theme.strongColor,
+                            onPressed: () async {
+                              if (Navigator.of(this.context).canPop())
+                                Navigator.pop(this.context);
+                              await sessionCommon.delete(
+                                  item.targetId, item.type,
+                                  notify: true);
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ],
+                ),
+              ),
+
+              // Bottom padding
+              SizedBox(height: 24),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMenuOption({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: color.withValues(alpha: 0.2),
+            width: 1,
+          ),
+        ),
+        child: Row(
+          children: [
+            Container(
+              padding: EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(
+                icon,
+                color: color,
+                size: 20,
+              ),
+            ),
+            SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: application.theme.fontColor1,
+                    ),
+                  ),
+                  SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: application.theme.fontColor3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Icon(
+              CupertinoIcons.chevron_right,
+              color: application.theme.fontColor4,
+              size: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoaded && _sessionList.isEmpty) {
+      return ChatNoMessageLayout();
+    }
+    return Column(
+      children: [
+        _getClientStatusView(),
+        _isShowTip ? _getTipView() : SizedBox.shrink(),
+        Expanded(
+          child: _sessionListView(),
+        ),
+      ],
+    );
+  }
+
+  _getClientStatusView() {
+    if (!clientConnectingVisible) return SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      height: Settings.screenWidth() / 25 + 20,
+      decoration: BoxDecoration(
+          border: Border(
+              bottom: BorderSide(
+                  color: application.theme.backgroundColor6.withAlpha(150),
+                  width: 0.5))),
+      // color: application.theme.backgroundColor6,
+      child: SpinKitThreeBounce(
+        color: application.theme.backgroundColor5.withAlpha(100),
+        size: Settings.screenWidth() / 25,
+      ),
+    );
+  }
+
+  _getTipView() {
+    return Container(
+      margin: const EdgeInsets.only(top: 25, bottom: 8, left: 20, right: 20),
+      padding: const EdgeInsets.only(bottom: 16),
+      width: double.infinity,
+      decoration: BoxDecoration(
+          color: application.theme.backgroundColor2,
+          borderRadius: BorderRadius.circular(8)),
+      child: Stack(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Container(
+                width: 48,
+                height: 48,
+                margin: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                    color: Color(0x190F6EFF),
+                    borderRadius: BorderRadius.circular(8)),
+                child: Center(
+                    child: Asset.iconSvg('lock',
+                        width: 24, color: application.theme.primaryColor)),
+              ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Padding(
+                      padding: const EdgeInsets.only(top: 16),
+                      child: Label(
+                        Settings.locale((s) => s.private_messages,
+                            ctx: context),
+                        type: LabelType.h3,
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Label(
+                        Settings.locale((s) => s.private_messages_desc,
+                            ctx: context),
+                        type: LabelType.bodyRegular,
+                        softWrap: true,
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: GestureDetector(
+                        onTap: () {
+                          Util.launchUrl('https://nmobile.nkn.org/');
+                        },
+                        child: Label(
+                          Settings.locale((s) => s.learn_more, ctx: context),
+                          type: LabelType.bodySmall,
+                          color: application.theme.primaryColor,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          Positioned(
+            right: 10,
+            top: 10,
+            child: InkWell(
+              onTap: () {
+                SettingsStorage.setSettings(
+                    SettingsStorage.CHAT_TIP_STATUS, true);
+                setState(() {
+                  _isShowTip = false;
+                });
+              },
+              child: Asset.iconSvg(
+                'close',
+                width: 16,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sessionListView() {
+    return ListView.builder(
+      padding: EdgeInsets.only(bottom: 80 + Settings.screenHeight() * 0.05),
+      controller: _scrollController,
+      itemCount: _sessionList.length,
+      itemBuilder: (BuildContext context, int index) {
+        if (index < 0 || index >= _sessionList.length) return SizedBox.shrink();
+        var session = _sessionList[index];
+        return Column(
+          children: [
+            ChatSessionItem(
+              session: session,
+              onTap: (who) {
+                ChatMessagesScreen.go(context, who).then((value) {
+                  _refreshBadge(delayMs: 0);
+                });
+              },
+              onLongPress: (who) {
+                _popItemMenu(session, index);
+              },
+            ),
+            Divider(
+                color: session.isTop
+                    ? application.theme.backgroundColor3.withAlpha(120)
+                    : application.theme.dividerColor,
+                height: 0,
+                indent: 70,
+                endIndent: 12),
+          ],
+        );
+      },
+    );
+  }
+}

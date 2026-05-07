@@ -1,0 +1,68 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/services.dart';
+import 'package:nchat_mobile/common/settings.dart';
+import 'package:nchat_mobile/components/tip/toast.dart';
+import 'package:nchat_mobile/utils/logger.dart';
+import 'package:url_launcher/url_launcher.dart' as UrlLauncher;
+
+class Util {
+  static void copyText(String? content, {bool toast = true}) {
+    if (content == null || content.isEmpty) return;
+    Clipboard.setData(ClipboardData(text: content));
+    if (toast) Toast.show(Settings.locale((s) => s.copy_success));
+  }
+
+  static void launchUrl(String? url) async {
+    if (url == null || url.isEmpty) return;
+    try {
+      final Uri _uri = Uri.parse(url);
+      await UrlLauncher.launchUrl(_uri);
+    } catch (e) {
+      logger.e("Util - launchUrl ---> $e");
+    }
+  }
+
+  static Future launchFile(String? filePath) async {
+    if (filePath == null || filePath.isEmpty) return;
+    try {
+      final Uri _uri = Uri.file(filePath);
+      if (await File(_uri.toFilePath()).exists()) {
+        await UrlLauncher.launchUrl(_uri);
+      } else {
+        logger.e("Util - launchFile ---> file not exist");
+      }
+    } catch (e) {
+      logger.e("Util - launchFile ---> $e");
+    }
+  }
+
+  static Map<String, dynamic>? jsonFormatMap(raw) {
+    Map<String, dynamic>? jsonData;
+    try {
+      jsonData = jsonDecode(raw);
+    } on Exception catch (e) {
+      logger.e("Util - jsonFormat ---> $e");
+    }
+    return jsonData;
+  }
+
+  static List? jsonFormatList(raw) {
+    List? jsonData;
+    try {
+      jsonData = jsonDecode(raw);
+    } on Exception catch (e) {
+      logger.e("Util - jsonFormat ---> $e");
+    }
+    return jsonData;
+  }
+
+  static num? getNumByValueDouble(double? value, int fractionDigits) {
+    if (value == null) return null;
+    String valueStr = value.toStringAsFixed(fractionDigits);
+    return fractionDigits == 0
+        ? int.tryParse(valueStr)
+        : double.tryParse(valueStr);
+  }
+}

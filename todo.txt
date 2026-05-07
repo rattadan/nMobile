@@ -1,0 +1,1 @@
+on the message screen we have a swiper "Swipe up to attach media" but it opens only after we psuh that button next to the tet inpiut. remove the button, and show the swiper all the time
